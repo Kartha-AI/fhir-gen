@@ -1,0 +1,126 @@
+# these are defined on the CloudBuild Trigger as well and will overwrite these
+substitutions:
+  _REGION: 'us-central1'
+  _FHIR_DATASET: 'fhir-dataset'
+  _FHIRSTORE: 'fhir-store'
+  _BQ_DATASET: 'fhir_dataset'
+  _BQ_SCHEMA_TYPE: 'ANALYTICS_V2'
+  _BQ_WRITE_DISPOSITION: 'WRITE_APPEND'
+  _TRIGGER_TOPIC: 'fhir-pubsub-topic'
+  
+#pre req: 
+#  ###############################################################################################
+#  [PROJECT_NUMBER]@cloudbuild.gserviceaccount.com) needs to be assigned Healthcare Dataset Admin
+#  [PROJECT_NUMBER]@cloudbuild.gserviceaccount.com) needs to be assigned Healthcare Firestore Admin
+#  [PROJECT_NUMBER]@cloudbuild.gserviceaccount.com) needs to be assigned Pub/Sub Admin
+#  [PROJECT_NUMBER]@cloudbuild.gserviceaccount.com) needs to be assigned BigQuery Admin
+#  ###############################################################################################
+
+steps:
+  # Step to enable necessary APIs (Healthcare API, Pub/Sub)
+  - name: 'gcr.io/cloud-builders/gcloud'
+    args: ['services', 'enable', 'healthcare.googleapis.com', 'pubsub.googleapis.com']
+
+  # Step to Create Dataset if it deosn't exist
+  - name: 'gcr.io/cloud-builders/gcloud'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        if gcloud healthcare datasets describe ${_FHIR_DATASET} --project=$PROJECT_ID --location=${_REGION} &>/dev/null; then
+          echo "Dataset already exists. Skipping creation."
+        else
+          echo "Dataset does not exist. Proceeding with creation."
+          gcloud healthcare datasets create ${_FHIR_DATASET}  --project=$PROJECT_ID --location=${_REGION}                 
+        fi
+
+  # Step to create a Pub/Sub topic if it does not exist
+  - name: 'gcr.io/cloud-builders/gcloud'
+    entrypoint: 'bash'
+    args:
+    - '-c'
+    - |
+      if gcloud pubsub topics describe projects/$PROJECT_ID/topics/${_TRIGGER_TOPIC} &>/dev/null; then
+        echo "Pub/Sub topic already exists. Skipping creation."
+      else
+        echo "Pub/Sub topic does not exist. Proceeding with creation."
+        gcloud pubsub topics create projects/$PROJECT_ID/topics/${_TRIGGER_TOPIC}
+      fi
+
+  # Step to create a FHIR store if it does not exist
+  - name: 'gcr.io/cloud-builders/gcloud'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+          if gcloud healthcare fhir-stores describe ${_FHIRSTORE}  --project=$PROJECT_ID --location=${_REGION} \
+             --dataset=${_FHIR_DATASET} --location=${_REGION} &>/dev/null; then
+            echo "FHIR store already exists. Skipping creation."
+          else
+            echo "FHIR store does not exist. Proceeding with creation."
+            gcloud healthcare fhir-stores create ${_FHIRSTORE}  --project=$PROJECT_ID --location=${_REGION} \
+                   --dataset=${_FHIR_DATASET} \
+                   --version=r4 \
+                   --enable-update-create \
+                   --pubsub-topic=projects/$PROJECT_ID/topics/${_TRIGGER_TOPIC}  
+          fi
+  
+  #step to create a BQ Dataset for streaming, if it does not exist
+  - name: 'gcr.io/cloud-builders/gcloud'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        if gcloud alpha bq datasets describe ${_BQ_DATASET}; then
+          echo "BigQuery dataset already exists."
+        else
+          echo "BigQuery dataset does not exist. Creating.."
+          gcloud alpha bq datasets create ${_BQ_DATASET}  --project=$PROJECT_ID
+        fi
+
+  # Step to Grant the role(s) bigquery.dataEditor and bigquery.jobUser roles to 
+  # project's Cloud Healthcare Service Agent (eg. service-243857147560@gcp-sa-healthcare.iam.gserviceaccount.com) 
+  - name: 'gcr.io/cloud-builders/gcloud'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        gcloud projects add-iam-policy-binding $PROJECT_ID \
+          --member="serviceAccount:service-$PROJECT_NUMBER@gcp-sa-healthcare.iam.gserviceaccount.com" \
+          --role=roles/bigquery.dataEditor \
+          --condition=None
+
+        gcloud projects add-iam-policy-binding $PROJECT_ID \
+          --member="serviceAccount:service-$PROJECT_NUMBER@gcp-sa-healthcare.iam.gserviceaccount.com" \
+          --role=roles/bigquery.jobUser \
+          --condition=None
+
+  # Step to update BQ Stremaing config on the FHIR store
+  # note: BQ datasets don't like "-" in the name, so we replace it with "_" in the PROJECT_ID
+  - name: 'gcr.io/cloud-builders/gcloud'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        cat > bqrequest.json << 'EOF'
+        {
+          "streamConfigs": [
+            {
+              "bigqueryDestination": {
+                "datasetUri": "bq://$PROJECT_ID.${_BQ_DATASET}",
+                "schemaConfig": {
+                  "schemaType": "${_BQ_SCHEMA_TYPE}"
+                },
+                "writeDisposition": "${_BQ_WRITE_DISPOSITION}"
+              }
+            }
+          ]
+        }
+        EOF
+        ACCESS_TOKEN=$(gcloud auth print-access-token)
+        curl -X PATCH \
+          -H "Authorization: Bearer $$ACCESS_TOKEN" \
+          -H "Content-Type: application/json; charset=utf-8" \
+          -d @bqrequest.json \
+          "https://healthcare.googleapis.com/v1/projects/$PROJECT_ID/locations/${_REGION}/datasets/${_FHIR_DATASET}/fhirStores/${_FHIRSTORE}?updateMask=streamConfigs"
+     

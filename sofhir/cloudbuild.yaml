@@ -1,0 +1,265 @@
+# This file is used to build and deploy the Cloud Functions for Smart on FHIR API Gateway
+substitutions:
+  _REGION: 'us-central1'
+  _ADB_CLUSTER: 'alloydb-cluster'
+  _ADB_INSTANCE: 'alloydb-instance'
+  _ADB_DATABASE: 'fhir_gpt'
+  _VPC_CONNECTOR: 'alloydb-vpc-connector'
+  _ADB_IP: 'alloydb-instance-IP'
+  _ADB_PORT: '5432'
+  _READ_CLOUD_FUNCTION_NAME: 'read'
+  _SEARCH_CLOUD_FUNCTION_NAME: 'search'
+  _UPDATE_CLOUD_FUNCTION_NAME: 'update'
+  _CREATE_CLOUD_FUNCTION_NAME: 'create'
+  _RAG_CLOUD_FUNCTION_NAME: 'rag'
+  _API_GATWAY_NAME: 'sofhir-api-gateway'
+  _API_CONFIG_NAME: 'sofhir-api-config'
+  _API_GATEWAY_HOST_SECRET: 'sofhir-api-gateway-host'
+  _API_NAME: 'sofhir-api'
+  _GCP_FHIR_API_BASE_URL: 'https://healthcare.googleapis.com/v1'
+  _FHIR_DATASET: 'fhir-dataset'
+  _FHIR_STORE: 'fhir-store'
+  _PATIENTS_TENANT_ID: 'patients-8okx0'
+  _PROVIDERS_TENANT_ID: 'providers-1d13d'
+  _PATIENT_ROLE_SCOPES: 'patient/Patient.read;patient/Observation.read;patient/Condition.read;patient/Procedure.read;patient/CarePlan.read;patient/MedicationRequest.read;patient/Encounter.read;patient/Immunization.read;patient/ServiceRequest.read;patient/Patient.write;patient/Observation.write;patient/Condition.write;patient/Procedure.write;patient/CarePlan.write;patient/MedicationRequest.write;patient/Encounter.write;patient/Immunization.write;patient/ServiceRequest.write;patient/DocumentReference.read;patient/DocumentReference.write;patient/Binary.read;patient/Binary.write;'
+  _PROVIDER_ROLE_SCOPES: 'user/Patient.read;user/Observation.read;user/Condition.read;user/Procedure.read;user/CarePlan.read;user/MedicationRequest.read;user/Encounter.read;user/Immunization.read;user/ServiceRequest.read;user/Patient.write;user/Observation.write;user/Condition.write;user/Procedure.write;user/CarePlan.write;user/MedicationRequest.write;user/Encounter.write;user/Immunization.write;user/ServiceRequest.write;user/DocumentReference.read;user/DocumentReference.write;user/Binary.read;user/Binary.write;'
+
+# #pre req: 
+#  ###############################################################################################
+#  [PROJECT_NUMBER]@cloudbuild.gserviceaccount.com) needs to be assigned Cloud Function Admin 
+#  [PROJECT_ID]-compute@developer.gserviceaccount.com needs Secrets Manager Secrets Access Role
+#  [PROJECT_ID]-compute@developer.gserviceaccount.com needs Cloud AlloyDB Database User
+#  [PROJECT_NUMBER]@cloudbuild.gserviceaccount.com) needs to be assigned API Gateway Admin
+#  The secret sofhir-api-gateway-host need to be pre-crated in console, because of the availableSecrets step at the end
+#  ###############################################################################################
+
+steps:
+  # enable the required api services for API Gateway
+  - name: 'gcr.io/cloud-builders/gcloud'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        echo 'enabling APIs'
+        gcloud services enable run.googleapis.com &&
+        gcloud services enable eventarc.googleapis.com &&  
+        gcloud services enable apigateway.googleapis.com && 
+        gcloud services enable servicemanagement.googleapis.com &&
+        gcloud services enable servicecontrol.googleapis.com
+
+  # Deploy read cloud function
+  - name: 'gcr.io/cloud-builders/gcloud'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        echo 'Deploying Read cloud function'
+        GCP_FHIR_API_URL="${_GCP_FHIR_API_BASE_URL}/projects/${PROJECT_ID}/locations/${_REGION}/datasets/${_FHIR_DATASET}/fhirStores/${_FHIR_STORE}/fhir"
+        gcloud functions deploy read \
+          --runtime=go121 \
+          --gen2 \
+          --project=$PROJECT_ID \
+          --region=${_REGION} \
+          --source=. \
+          --entry-point=Read \
+          --trigger-http \
+          --no-allow-unauthenticated \
+          --set-env-vars="PROJECT_ID=${PROJECT_ID}" \
+          --set-env-vars="REGION=${_REGION}" \
+          --set-env-vars="GCP_FHIR_API_URL=$$GCP_FHIR_API_URL" \
+          --set-env-vars="PATIENT_ROLE_SCOPES=${_PATIENT_ROLE_SCOPES}" \
+          --set-env-vars="PROVIDER_ROLE_SCOPES=${_PROVIDER_ROLE_SCOPES}" 
+
+  # Deploy search cloud function
+  - name: 'gcr.io/cloud-builders/gcloud'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        echo 'Deploying Search cloud function'
+        GCP_FHIR_API_URL="${_GCP_FHIR_API_BASE_URL}/projects/${PROJECT_ID}/locations/${_REGION}/datasets/${_FHIR_DATASET}/fhirStores/${_FHIR_STORE}/fhir"
+        gcloud functions deploy search \
+          --runtime=go121 \
+          --gen2 \
+          --project=$PROJECT_ID \
+          --region=${_REGION} \
+          --source=. \
+          --entry-point=Search \
+          --trigger-http \
+          --no-allow-unauthenticated \
+          --set-env-vars="PROJECT_ID=${PROJECT_ID}" \
+          --set-env-vars="REGION=${_REGION}" \
+          --set-env-vars="GCP_FHIR_API_URL=$$GCP_FHIR_API_URL" \
+          --set-env-vars="PATIENT_ROLE_SCOPES=${_PATIENT_ROLE_SCOPES}" \
+          --set-env-vars="PROVIDER_ROLE_SCOPES=${_PROVIDER_ROLE_SCOPES}" \
+          --set-env-vars="API_GATEWAY_HOST=$$API_GATEWAY_HOST"
+          
+    secretEnv: ['API_GATEWAY_HOST']
+
+  # Deploy update cloud function
+  - name: 'gcr.io/cloud-builders/gcloud'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        echo 'Deploying Update cloud function'
+        GCP_FHIR_API_URL="${_GCP_FHIR_API_BASE_URL}/projects/${PROJECT_ID}/locations/${_REGION}/datasets/${_FHIR_DATASET}/fhirStores/${_FHIR_STORE}/fhir"
+        gcloud functions deploy update \
+          --runtime=go121 \
+          --gen2 \
+          --project=$PROJECT_ID \
+          --region=${_REGION} \
+          --source=. \
+          --entry-point=Update \
+          --trigger-http \
+          --no-allow-unauthenticated \
+          --set-env-vars="PROJECT_ID=${PROJECT_ID}" \
+          --set-env-vars="REGION=${_REGION}" \
+          --set-env-vars="GCP_FHIR_API_URL=$$GCP_FHIR_API_URL" \
+          --set-env-vars="PATIENT_ROLE_SCOPES=${_PATIENT_ROLE_SCOPES}" \
+          --set-env-vars="PROVIDER_ROLE_SCOPES=${_PROVIDER_ROLE_SCOPES}" 
+
+  # Deploy create cloud function
+  - name: 'gcr.io/cloud-builders/gcloud'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        echo 'Deploying Create cloud function'
+        GCP_FHIR_API_URL="${_GCP_FHIR_API_BASE_URL}/projects/${PROJECT_ID}/locations/${_REGION}/datasets/${_FHIR_DATASET}/fhirStores/${_FHIR_STORE}/fhir"
+        gcloud functions deploy create \
+          --runtime=go121 \
+          --gen2 \
+          --project=$PROJECT_ID \
+          --region=${_REGION} \
+          --source=. \
+          --entry-point=Create \
+          --trigger-http \
+          --no-allow-unauthenticated \
+          --set-env-vars="PROJECT_ID=${PROJECT_ID}" \
+          --set-env-vars="REGION=${_REGION}" \
+          --set-env-vars="GCP_FHIR_API_URL=$$GCP_FHIR_API_URL" \
+          --set-env-vars="PATIENT_ROLE_SCOPES=${_PATIENT_ROLE_SCOPES}" \
+          --set-env-vars="PROVIDER_ROLE_SCOPES=${_PROVIDER_ROLE_SCOPES}" 
+
+  # deploy cloud function for Firebase Authentication trigger: onUserCreate
+  # Still gen1: Cloud Functions 2nd gen does not currently support Firebase Authentication triggers.
+  - name: 'gcr.io/cloud-builders/gcloud'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        echo 'Deploying UserCreationHandler cloud function'
+        GCP_FHIR_API_URL="${_GCP_FHIR_API_BASE_URL}/projects/${PROJECT_ID}/locations/${_REGION}/datasets/${_FHIR_DATASET}/fhirStores/${_FHIR_STORE}/fhir"
+        gcloud functions deploy userCreationHandler \
+          --runtime go121 \
+          --project=$PROJECT_ID \
+          --region=${_REGION} \
+          --source=. \
+          --entry-point UserCreationHandler \
+          --trigger-event providers/firebase.auth/eventTypes/user.create \
+          --allow-unauthenticated \
+          --set-env-vars="PROJECT_ID=${PROJECT_ID}" \
+          --set-env-vars="REGION=${_REGION}" \
+          --set-env-vars="GCP_FHIR_API_URL=$$GCP_FHIR_API_URL" \
+          --set-env-vars="PATIENTS_TENANT_ID=${_PATIENTS_TENANT_ID}" \
+          --set-env-vars="PROVIDERS_TENANT_ID=${_PROVIDERS_TENANT_ID}" 
+      
+  # Deploy rag cloud function
+  - name: 'gcr.io/cloud-builders/gcloud'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        echo 'Deploying Rag cloud function'
+        GCP_FHIR_API_URL="${_GCP_FHIR_API_BASE_URL}/projects/${PROJECT_ID}/locations/${_REGION}/datasets/${_FHIR_DATASET}/fhirStores/${_FHIR_STORE}/fhir"
+        IAM_SERVICE_ACCOUNT_NAME="${PROJECT_ID}@appspot"
+        gcloud functions deploy rag \
+          --runtime=go121 \
+          --gen2 \
+          --project=$PROJECT_ID \
+          --region=${_REGION} \
+          --source=. \
+          --entry-point=Rag \
+          --trigger-http \
+          --no-allow-unauthenticated \
+          --vpc-connector="${_VPC_CONNECTOR}" \
+          --set-secrets="ADB_IP=${_ADB_IP}:latest" \
+          --set-env-vars="PROJECT_ID=${PROJECT_ID}" \
+          --set-env-vars="REGION=${_REGION}" \
+          --set-env-vars="GCP_FHIR_API_URL=$$GCP_FHIR_API_URL" \
+          --set-env-vars="ADB_IAM_USER=$$IAM_SERVICE_ACCOUNT_NAME" \
+          --set-env-vars="ADB_CLUSTER=${_ADB_CLUSTER}" \
+          --set-env-vars="ADB_INSTANCE=${_ADB_INSTANCE}" \
+          --set-env-vars="ADB_DATABASE=${_ADB_DATABASE}"  \
+          --set-env-vars="ADB_PORT=${_ADB_PORT}" \
+          --set-env-vars="PATIENT_ROLE_SCOPES=${_PATIENT_ROLE_SCOPES}" \
+          --set-env-vars="PROVIDER_ROLE_SCOPES=${_PROVIDER_ROLE_SCOPES}" 
+
+  # Modify openapi.yaml with cloud function URLs
+  - name: 'gcr.io/cloud-builders/gcloud'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        echo 'Modifying openapi.yaml with cloud function URLs'
+        sed -i "s|{PROJECT-ID}|$PROJECT_ID|g" openapi.yaml
+        READ_CLOUD_FUNCTION_URL="https://${_REGION}-$PROJECT_ID.cloudfunctions.net/${_READ_CLOUD_FUNCTION_NAME}"
+        SEARCH_CLOUD_FUNCTION_URL="https://${_REGION}-$PROJECT_ID.cloudfunctions.net/${_SEARCH_CLOUD_FUNCTION_NAME}"
+        UPDATE_CLOUD_FUNCTION_URL="https://${_REGION}-$PROJECT_ID.cloudfunctions.net/${_UPDATE_CLOUD_FUNCTION_NAME}"
+        CREATE_CLOUD_FUNCTION_URL="https://${_REGION}-$PROJECT_ID.cloudfunctions.net/${_CREATE_CLOUD_FUNCTION_NAME}"
+        RAG_CLOUD_FUNCTION_URL="https://${_REGION}-$PROJECT_ID.cloudfunctions.net/${_RAG_CLOUD_FUNCTION_NAME}"
+        sed -i "s|{READ_CLOUD_FUNCTION_URL}|$$READ_CLOUD_FUNCTION_URL|g" openapi.yaml
+        sed -i "s|{SEARCH_CLOUD_FUNCTION_URL}|$$SEARCH_CLOUD_FUNCTION_URL|g" openapi.yaml
+        sed -i "s|{UPDATE_CLOUD_FUNCTION_URL}|$$UPDATE_CLOUD_FUNCTION_URL|g" openapi.yaml
+        sed -i "s|{CREATE_CLOUD_FUNCTION_URL}|$$CREATE_CLOUD_FUNCTION_URL|g" openapi.yaml
+        sed -i "s|{RAG_CLOUD_FUNCTION_URL}|$$RAG_CLOUD_FUNCTION_URL|g" openapi.yaml
+        
+  # Deploy API Gateway
+  - name: 'gcr.io/cloud-builders/gcloud'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        echo 'Deploying API Gateway'
+        TIMESTAMP=$(date +"%Y%m%d%H%M%S")
+        API_CONFIG_NAME="${_API_CONFIG_NAME}-$$TIMESTAMP"
+        IAM_SERVICE_ACCOUNT_EMAIL="${PROJECT_ID}@appspot.gserviceaccount.com"
+        echo 'creating API Config'
+        gcloud api-gateway api-configs create "$$API_CONFIG_NAME" \
+          --api="${_API_NAME}" \
+          --openapi-spec=openapi.yaml \
+          --project="$PROJECT_ID" \
+          --backend-auth-service-account="$$IAM_SERVICE_ACCOUNT_EMAIL" && 
+        if gcloud api-gateway gateways describe "${_API_GATWAY_NAME}" --project="$PROJECT_ID" --location="${_REGION}" --quiet; then
+          echo "API Gateway '${_API_GATWAY_NAME}' already exists. Updating..."
+          gcloud api-gateway gateways update "${_API_GATWAY_NAME}" \
+            --api="${_API_NAME}" \
+            --api-config="$$API_CONFIG_NAME" \
+            --project=$PROJECT_ID \
+            --location=${_REGION}  
+        else
+          echo "API Gateway '${_API_GATWAY_NAME}' does not exist. Creating..."
+          gcloud api-gateway gateways create "${_API_GATWAY_NAME}" \
+            --api="${_API_NAME}" \
+            --api-config="$$API_CONFIG_NAME" \
+            --project=$PROJECT_ID \
+            --location=${_REGION}  
+        fi
+        echo 'Getting api gateway default hostname and storign it secrets manager'
+        gcloud api-gateway gateways describe "${_API_GATWAY_NAME}" \
+            --location=${_REGION}  \
+            --format="value(defaultHostname)" > api-gateway_host.txt &&
+        API_GATEWAY_HOST=$(cat api-gateway_host.txt)
+        if gcloud secrets describe ${_API_GATEWAY_HOST_SECRET}  &>/dev/null; then
+          echo "Secret ${_API_GATEWAY_HOST_SECRET} exists. Adding a new version..."
+          echo -n "$$API_GATEWAY_HOST" | gcloud secrets versions add ${_API_GATEWAY_HOST_SECRET} --data-file=- 
+        else
+          echo "Secret ${_API_GATEWAY_HOST_SECRET} does not exist. Creating..."
+          echo -n "$$API_GATEWAY_HOST" | gcloud secrets create ${_API_GATEWAY_HOST_SECRET} --data-file=- --replication-policy="automatic" 
+        fi
+
+availableSecrets:
+  secretManager:
+  - versionName: projects/${PROJECT_ID}/secrets/${_API_GATEWAY_HOST_SECRET}/versions/latest
+    env: 'API_GATEWAY_HOST'

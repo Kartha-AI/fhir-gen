@@ -1,0 +1,70 @@
+# This file is used to build and deploy the Cloud Functions for loading fhir data emebeddigns to alloydb
+substitutions:
+  _REGION: 'us-central1'
+  _TRIGGER_TOPIC: 'fhir-pubsub-topic'
+  _ADB_CLUSTER: 'alloydb-cluster'
+  _ADB_INSTANCE: 'alloydb-instance'
+  _ADB_DATABASE: 'fhir_gen'
+  _VPC_CONNECTOR: 'alloydb-vpc-connector'
+  _ADB_IP: 'alloydb-instance-IP'
+  _ADB_PORT: '5432'
+  _ML_EMBEDDING_MODEL: 'textembedding-gecko@001'
+  _ML_GEN_AI_MODEL: 'text-bison'
+  _ML_MAX_OUTPUT_TOKENS: '2048'
+  _ML_TOPK: '40'
+  _ML_TOPP: '0.8'
+  _ML_TEMPERATURE: '0.2'
+
+#pre req: 
+#  ###############################################################################################
+#  [PROJECT_NUMBER]@cloudbuild.gserviceaccount.com) needs to be assigned Cloud Function Admin 
+#  [PROJECT_ID]-compute@developer.gserviceaccount.com needs FHIR Resources Read Role
+#  [PROJECT_ID]-compute@developer.gserviceaccount.com needs Secrets Manager Secrets Access Role
+#  [PROJECT_ID]-compute@developer.gserviceaccount.com needs Cloud AlloyDB Database User
+#  ###############################################################################################
+
+steps:
+
+  # enable the required api services 
+  - name: 'gcr.io/cloud-builders/gcloud'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        echo 'enabling APIs'
+        gcloud services enable run.googleapis.com &&
+        gcloud services enable eventarc.googleapis.com  
+        
+  #Deploy cloud function
+  - name: 'gcr.io/cloud-builders/gcloud'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        gcloud functions deploy fhirPubSub \
+          --runtime=go121 \
+          --gen2 \
+          --project=$PROJECT_ID \
+          --region=${_REGION} \
+          --source=. \
+          --entry-point=FHIRPubSub \
+          --trigger-event=providers/cloud.pubsub/eventTypes/topic.publish \
+          --trigger-resource=${_TRIGGER_TOPIC} \
+          --vpc-connector="${_VPC_CONNECTOR}" \
+          --set-secrets="ADB_IP=${_ADB_IP}:latest" \
+          --set-env-vars="PROJECT_ID=${PROJECT_ID}" \
+          --set-env-vars="REGION=${_REGION}" \
+          --set-env-vars="ADB_IAM_USER=$$IAM_SERVICE_ACCOUNT_NAME" \
+          --set-env-vars="ADB_CLUSTER=${_ADB_CLUSTER}" \
+          --set-env-vars="ADB_INSTANCE=${_ADB_INSTANCE}" \
+          --set-env-vars="ADB_DATABASE=${_ADB_DATABASE}"  \
+          --set-env-vars="ADB_PORT=${_ADB_PORT}" \
+          --set-env-vars="ML_EMBEDDING_MODEL=${_ML_EMBEDDING_MODEL}" \
+          --set-env-vars="ML_GEN_AI_MODEL=${_ML_GEN_AI_MODEL}" \
+          --set-env-vars="ML_MAX_OUTPUT_TOKENS=${_ML_MAX_OUTPUT_TOKENS}" \
+          --set-env-vars="ML_TOPK=${_ML_TOPK}" \
+          --set-env-vars="ML_TOPP=${_ML_TOPP}" \
+          --set-env-vars="ML_TEMPERATURE=${_ML_TEMPERATURE}" 
+
+    timeout: 600s  # Set a timeout of 10 minutes (600 seconds) for this step
+          

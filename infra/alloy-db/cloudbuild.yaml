@@ -1,0 +1,252 @@
+# This cloudbuild.yaml file is used to create an AlloyDB cluster, instance, and a database on the instance
+
+# these are defined on the CloudBuild Trigger as well and will overwrite these
+substitutions: 
+  _PSA_RANGE: 'psa-range'
+  _ADB_PASSWORD: 'alloydb-password'
+  _REGION: 'us-central1'
+  _VPC_NETWORK: 'default'
+  _ADB_CLUSTER: 'alloydb-cluster'
+  _ADB_INSTANCE: 'alloydb-instance'  
+  _ADB_AVAILABILITY_TYPE: 'ZONAL'
+  _ADB_VPC_CONNECTOR: 'alloydb-vpc-connector'
+  _ADB_VPC_CONNECTOR_IP_RANGE: '10.8.0.0/28'
+  _CPU_COUNT: '2'
+  _ADB_IP: 'alloydb-instance-IP'
+  _ZONE: 'us-central1-a'
+  _ADB_DATABASE: 'fhir_gen'
+  _ADB_USER: 'postgres'
+  _VM_NAME: 'fhir-gen-psql-vm'
+  _VM_TYPE: 'e2-medium'
+  _ML_EMBEDDING_MODEL: 'textembedding-gecko@001'
+  _ML_GEN_AI_MODEL: 'text-bison'
+  _ML_MAX_OUTPUT_TOKENS: '2048'
+  _ML_TOPK: '40'
+  _ML_TOPP: '0.8'
+  _ML_TEMPERATURE: '0.2'
+
+steps:
+#pre req: 
+#  ###############################################################################################
+#  [PROJECT_NUMBER]@cloudbuild.gserviceaccount.com) needs to be assigned Service Usage Admin role
+#  [PROJECT_NUMBER]@cloudbuild.gserviceaccount.com) needs to be assigned Computer Network Admin role
+#  [PROJECT_NUMBER]@cloudbuild.gserviceaccount.com) needs to be assigned Secret Manager Admin  role
+#  [PROJECT_NUMBER]@cloudbuild.gserviceaccount.com) needs to be assigned Cloud AlloyDB Admin
+#  [PROJECT_NUMBER]@cloudbuild.gserviceaccount.com) needs to be assigned IAM Project Admin
+#  [PROJECT_NUMBER]@cloudbuild.gserviceaccount.com) needs to be assigned Crete Service Account
+#  [PROJECT_NUMBER]@cloudbuild.gserviceaccount.com) needs to be assigned Cloud Run Admin role
+#  [PROJECT_NUMBER]@cloudbuild.gserviceaccount.com) needs to be assigned Service Account User role
+#  [PROJECT_NUMBER]@cloudbuild.gserviceaccount.com) needs to be assigned CloudBuild WorkerPool User
+#  [PROJECT_NUMBER]@cloudbuild.gserviceaccount.com) needs to be assigned Compute Instance Admin
+#  [PROJECT_NUMBER]@cloudbuild.gserviceaccount.com) needs to be assigned VPC Access Admin
+#  these secrets need to be there at startup, because of the 'availableSecrets' step at the end
+#      - "alloydb-password" 
+#      - "alloydb-instance-IP"  
+#  Run 
+#    - gcloud auth login to authenticate the user
+#    - gcloud auth application-default set-quota-project dev-fhir-gen
+#    - gcloud config set project dev-fhir-gen
+#  ###############################################################################################
+
+# step0: enable the required api services for AlloyDB
+- name: 'gcr.io/cloud-builders/gcloud'
+  entrypoint: 'bash'
+  args:
+    - '-c'
+    - |
+      echo 'enabling APIs'
+      gcloud services enable cloudbuild.googleapis.com &&
+      gcloud services enable aiplatform.googleapis.com &&
+      gcloud services enable alloydb.googleapis.com &&
+      gcloud services enable compute.googleapis.com &&
+      gcloud services enable servicenetworking.googleapis.com &&
+      gcloud services enable cloudresourcemanager.googleapis.com &&
+      gcloud services enable secretmanager.googleapis.com &&
+      gcloud services enable vpcaccess.googleapis.com &&
+      gcloud services enable iam.googleapis.com 
+
+# step1: allocate a private IP range in our VPC to enable private service Access to AlloyDB
+- name: 'gcr.io/cloud-builders/gcloud'
+  entrypoint: 'bash'
+  args:
+  - '-c'
+  - |
+    if ! gcloud compute addresses describe ${_PSA_RANGE} --global --format="value(name)" 2>/dev/null; then
+      gcloud compute addresses create ${_PSA_RANGE} \
+      --global \
+      --purpose=VPC_PEERING \
+      --prefix-length=16 \
+      --description="VPC private service access" \
+      --network=default
+    else
+      echo "${_PSA_RANGE} already exists, skipping creation."
+    fi
+
+# step2: create private connection using the allocated IP range:
+- name: 'gcr.io/cloud-builders/gcloud'
+  entrypoint: 'sh'
+  args:
+  - '-c'
+  - |
+    echo "Attempting to create VPC peering connection with ${_PSA_RANGE}..."
+    if gcloud services vpc-peerings connect \
+        --service=servicenetworking.googleapis.com \
+        --ranges=${_PSA_RANGE} \
+        --network=default --quiet 2>/dev/null; then
+      echo "VPC peering connection either exists or created successfully."
+    else
+      echo "Failed to create VPC peering connection. It may already exist or another error occurred."
+    fi
+
+# step3: create serverless VPC Access that allows Cloud Functions, Cloud Run to access AlloyDB in the VPC
+- name: 'gcr.io/cloud-builders/gcloud'
+  entrypoint: 'bash'
+  args:
+  - '-c'
+  - |
+    if gcloud compute networks vpc-access connectors describe ${_ADB_VPC_CONNECTOR} --region=${_REGION} >/dev/null 2>&1; then
+        echo "Serverless VPC Access connector ${_ADB_VPC_CONNECTOR} already exists."
+      else
+        gcloud compute networks vpc-access connectors create ${_ADB_VPC_CONNECTOR} \
+          --network=${_VPC_NETWORK} \
+          --region=${_REGION} \
+          --range=${_ADB_VPC_CONNECTOR_IP_RANGE}
+        echo "Serverless VPC Access connector ${_ADB_VPC_CONNECTOR} Created."
+      fi
+
+# step4: create an AlloyDB cluster, set secrets for the password and grant IAM user to the cluster
+- name: 'gcr.io/cloud-builders/gcloud'
+  entrypoint: 'bash'
+  args:
+  - '-c'
+  - |
+    echo "Checking for existing AlloyDB Cluster..."
+    if gcloud alloydb clusters describe "${_ADB_CLUSTER}" --region="${_REGION}" > /dev/null 2>&1; then
+      echo "AlloyDB Cluster already exists. No action taken."
+    else
+      echo "No existing AlloyDB Cluster found. Attempting to create..."
+      PGPASSWORD=$(openssl rand -base64 12) 
+      if gcloud secrets describe ${_ADB_PASSWORD}  &>/dev/null; then
+        echo "Secret ${_ADB_PASSWORD} exists. Adding a new version..."
+        echo -n "$$PGPASSWORD" | gcloud secrets versions add ${_ADB_PASSWORD} --data-file=- 
+      else
+        echo "Secret ${_ADB_PASSWORD} does not exist. Creating..."
+        echo -n "$$PGPASSWORD" | gcloud secrets create ${_ADB_PASSWORD} --data-file=- --replication-policy="automatic" 
+      fi
+      if gcloud alloydb clusters create "${_ADB_CLUSTER}" \
+        --password="$$PGPASSWORD" \
+        --network=default \
+        --region="${_REGION}" --quiet; then
+         echo "Created AlloyDB Cluster."
+      else
+          echo "Error creating AlloyDB Cluster. Please check the logs for details."
+      fi
+    fi
+
+# step5: create an AlloyDB instance and add the cloud function service account "${PROJECT_ID}@appspot to the instance
+- name: 'gcr.io/cloud-builders/gcloud'
+  entrypoint: 'bash'
+  args:
+  - '-c'
+  - |
+    echo "Checking for existing AlloyDB instance..."
+    if gcloud alloydb instances describe "${_ADB_INSTANCE}" \
+      --cluster="${_ADB_CLUSTER}" \
+      --region="${_REGION}" \
+      --format="value(name)" >/dev/null 2>&1; then
+      echo "AlloyDB instance '${_ADB_INSTANCE}' already exists. No action taken."
+    else
+      echo "No existing AlloyDB instance found. Attempting to create..."
+      if gcloud alloydb instances create "${_ADB_INSTANCE}" \
+        --cluster="${_ADB_CLUSTER}" \
+        --region="${_REGION}" \
+        --instance-type="PRIMARY" \
+        --cpu-count=${_CPU_COUNT} \
+        --database-flags=alloydb.iam_authentication=on \
+        --availability-type=${_ADB_AVAILABILITY_TYPE} \
+        --quiet; then
+        echo "AlloyDB instance '${_ADB_INSTANCE}' created successfully."
+      else
+        echo "Failed to create AlloyDB instance. Please check the logs for details."
+      fi
+    fi
+    IAM_SERVICE_ACCOUNT_NAME="${PROJECT_ID}@appspot"
+    if gcloud alloydb users create $$IAM_SERVICE_ACCOUNT_NAME \
+                --cluster=${_ADB_CLUSTER} \
+                --region=${_REGION}\
+                --type=IAM_BASED --quiet; then
+        echo "created IAM User on AlloyDB Cluster"
+    else 
+        echo "Unable to create IAM User on AlloyDB Cluster. Or it may already exist. Please check the logs for details."
+    fi
+
+# step6: get AlloyDB Instance IP and store it as a secret for other steps/processes
+- name: 'gcr.io/cloud-builders/gcloud'
+  entrypoint: 'bash'
+  args:
+  - '-c'
+  - |
+    echo "Getting AlloyDB Instance IP..."
+    ADB_IP=$(gcloud alloydb instances describe ${_ADB_INSTANCE} \
+      --cluster=${_ADB_CLUSTER} \
+      --region=${_REGION} \
+      --format="get(ipAddress)")
+    echo "$$ADB_IP"
+    if gcloud secrets describe ${_ADB_IP}  &>/dev/null; then
+      echo "Secret ${_ADB_IP} exists. Adding a new version..."
+      echo -n "$$ADB_IP" | gcloud secrets versions add ${_ADB_IP} --data-file=- 
+    else
+      echo "Secret ${_ADB_IP} does not exist. Creating..."
+      echo -n "$$ADB_IP" | gcloud secrets create ${_ADB_IP} --data-file=- --replication-policy="automatic" 
+    fi
+
+# step7: grant alloydb service account the Vertex AI Permissions
+- name: 'gcr.io/cloud-builders/gcloud'
+  entrypoint: 'bash'
+  args:
+  - '-c'
+  - |
+    gcloud projects add-iam-policy-binding $PROJECT_ID \
+        --member="serviceAccount:service-$PROJECT_NUMBER@gcp-sa-alloydb.iam.gserviceaccount.com" \
+        --role="roles/aiplatform.user" \
+        --condition=None
+
+# step8: create a VM and run psql.sh to create fhir_gen database on the Alloydb Instance 
+# and grant access to the cloud functions service account "${PROJECT_ID}@appspot
+- name: 'gcr.io/cloud-builders/gcloud'
+  entrypoint: 'bash'
+  args:
+    - '-c'
+    - |
+      if gcloud compute instances describe ${_VM_NAME} --zone=${_ZONE} &>/dev/null; then
+        echo "VM ${_VM_NAME} already exists.. skippping the creation."
+      else
+        echo "Creating VM ${_VM_NAME} and running psql.sh to create fhir_gen database on the Alooydb Instance"
+        IAM_SERVICE_ACCOUNT_NAME="${PROJECT_ID}@appspot"
+        gcloud compute instances create ${_VM_NAME} \
+          --zone=${_ZONE} \
+          --machine-type=${_VM_TYPE} \
+          --scopes=https://www.googleapis.com/auth/cloud-platform \
+          --metadata=ALLOYDB_HOST=$$INSTANCE_IP,ALLOYDB_USER=${_ADB_USER},ALLOYDB_PASSWORD=$$DB_PASSWORD,ALLOYDB_DB=${_ADB_DATABASE},ALLOYDB_IAM_USER=$$IAM_SERVICE_ACCOUNT_NAME,ML_EMBEDDING_MODEL=${_ML_EMBEDDING_MODEL},ML_GEN_AI_MODEL=${_ML_GEN_AI_MODEL},ML_MAX_OUTPUT_TOKENS=${_ML_MAX_OUTPUT_TOKENS},ML_TOPK=${_ML_TOPK},ML_TOPP=${_ML_TOPP},ML_TEMPERATURE=${_ML_TEMPERATURE} \
+          --metadata-from-file=startup-script=./alloy-db/psql.sh
+      fi
+
+  secretEnv: ['DB_PASSWORD', 'INSTANCE_IP']
+
+  # # Optional Step: Cleanup - Delete the VM. !! Keeping the VM for now. 
+  # - name: 'gcr.io/cloud-builders/gcloud'
+  #   entrypoint: 'bash'
+  #   args:
+  #     - '-c'
+  #     - |
+  #       gcloud compute instances delete ${_VM_NAME} --zone=${_ZONE} --quiet
+
+availableSecrets:
+  secretManager:
+  - versionName: projects/${PROJECT_ID}/secrets/${_ADB_PASSWORD}/versions/latest
+    env: 'DB_PASSWORD'
+  - versionName: projects/${PROJECT_ID}/secrets/${_ADB_IP}/versions/latest
+    env: 'INSTANCE_IP'
+
+timeout: '1600s' # Adjust the timeout to suit your needs
+

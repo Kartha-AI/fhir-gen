@@ -1,0 +1,179 @@
+swagger: '2.0'
+info:
+  title: sofhir
+  description: Smart on FHIR API Gateway
+  version: 1.0.0
+schemes:
+  - https
+produces:
+  - application/json
+paths:
+  /fhir/{type}/{id}:
+    get:
+      summary: "Read FHIR Resource"
+      description: "Get a FHIR resource by type and id"
+      operationId: "read"
+      parameters:
+        - in: path
+          name: type
+          required: true
+          type: string
+        - in: path
+          name: id
+          required: true
+          type: string
+      responses:
+        "200":
+          description: "Successful operation"
+        "401":
+          description: "Unauthorized"
+        "403":
+          description: "Forbidden"
+        "404":
+          description: "Not found"
+      x-google-backend:
+        address: "{READ_CLOUD_FUNCTION_URL}"
+        deadline: 60.0
+    put:
+      summary: "Update FHIR Resource"
+      description: "Update a FHIR resource by type and id"
+      operationId: "update"
+      consumes:
+        - application/json
+      parameters:
+        - in: path
+          name: type
+          required: true
+          type: string
+        - in: path
+          name: id
+          required: true
+          type: string
+        - name: body
+          in: body
+          description: FHIR JSON request body
+          required: true
+          schema:
+            $ref: '#/definitions/FHIRRequestBody'
+      responses:
+        "200":
+          description: "Successful operation"
+        "401":
+          description: "Unauthorized"
+        "403":
+          description: "Forbidden"
+        "404":
+          description: "Not found"
+      x-google-backend:
+        address: "{UPDATE_CLOUD_FUNCTION_URL}"
+        deadline: 60.0
+  /fhir/{type}:
+    get:
+      summary: "Search FHIR Resources"
+      description: "Search FHIR resources by type"
+      operationId: "search"
+      parameters:
+        - in: path
+          name: type
+          required: true
+          type: string
+      responses:
+        "200":
+          description: "Successful operation"
+        "401":
+          description: "Unauthorized"
+        "403":
+          description: "Forbidden"
+        "404":
+          description: "Not found"
+      x-google-backend:
+        address: "{SEARCH_CLOUD_FUNCTION_URL}"
+        deadline: 60.0
+    post:
+      summary: "Create FHIR Resource"
+      description: "Create a new FHIR resource of the specified type"
+      operationId: "create"
+      consumes:
+        - application/json
+      parameters:
+        - in: path
+          name: type
+          required: true
+          type: string
+        - in: body
+          name: body
+          description: FHIR JSON request body
+          required: true
+          schema:
+            $ref: '#/definitions/FHIRRequestBody'
+      responses:
+        "200":
+          description: "Successful operation"
+        "401":
+          description: "Unauthorized"
+        "403":
+          description: "Forbidden"
+      x-google-backend:
+        address: "{CREATE_CLOUD_FUNCTION_URL}"
+        deadline: 60.0
+  /rag:
+    post:
+      summary: Handle a Gen AI Prompt
+      operationId: rag
+      consumes:
+        - application/json
+      produces:
+        - application/json
+      parameters:
+        - in: body
+          name: body
+          description: JSON request body
+          required: true
+          schema:
+            $ref: '#/definitions/RagRequestBody'
+      responses:
+        '200':
+          description: Success response
+          schema:
+            $ref: '#/definitions/RagSuccessResponse'
+        '400':
+          description: Bad request
+        '401':
+          description: Unauthenticated
+        '404':
+          description: Patient not found
+      x-google-backend:
+        address: {RAG_CLOUD_FUNCTION_URL}
+        deadline: 60.0
+
+definitions:
+  FHIRRequestBody:
+    type: object
+    properties: {}
+  RagRequestBody:
+    type: object
+    properties:
+      patientId:
+        type: string
+        example: "7bf35938-c939-4f7b-a2ee-4f388748936c"
+      prompt:
+        type: string
+        example: "What is the latest blood pressure reading for this patient?"
+  RagSuccessResponse:
+    type: object
+    properties:
+      response:
+        type: string
+        example: "The latest blood pressure reading for this patient was recorded on December 30, 2022. The diastolic blood pressure was 80 mm[Hg] and the systolic blood pressure was 131 mm[Hg]."
+
+   
+security:
+    - firebase: []
+securityDefinitions:
+  firebase:
+    authorizationUrl: ""
+    flow: "implicit"
+    type: "oauth2"
+    x-google-issuer: "https://securetoken.google.com/{PROJECT-ID}"
+    x-google-jwks_uri: "https://www.googleapis.com/service_accounts/v1/metadata/x509/securetoken@system.gserviceaccount.com"
+    x-google-audiences: "{PROJECT-ID}"
