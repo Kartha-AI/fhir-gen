@@ -10,7 +10,7 @@ A Golang (GO) framework that enables RAG on FHIR Data: Set of Cloud fucntions th
 Read bottom for the infrastructure that supprots this
 
 ## Architecture
-<img src="fhir-gen-architecture.png">
+<img src="architecture.png">
 
 ### prereq:
 ````
