@@ -4,7 +4,7 @@
 - *sofhir* : smart-on-fhir API gateway for FHIR APIs
 - *infra*: Infra as code for fhir-gen
 
-# fhir-gen
+# 1. fhir-gen
 A Golang (GO) framework that enables RAG on FHIR Data: Set of Cloud fucntions that take a FHIR resource and have LLM generate text sumamry, create vector emebeddigns from it and then store in AlloyDB.
 
 Read bottom for the infrastructure that supprots this
@@ -53,8 +53,8 @@ cd gcp-fhir-pubsub
 gcloud builds submit --config=./cloudbuild.yaml .
 ````
 
-# sofhir: smart on FHIR APIs
-Repo with http cloud fucntions for SmartOnFHIR (sofhir) gateway that secures the FHIR API calls to Google Cloud Healthcare API using Firebase Auth
+# 2. sofhir: smart on FHIR APIs
+contains http cloud functions for SmartOnFHIR (sofhir) gateway that secures the FHIR API calls to Google Cloud Healthcare API using Firebase Auth
 
 Here are the sofhir API gateway functions which upon authenticated will call GCP FHIR APIs
 
@@ -101,7 +101,7 @@ gcloud builds submit --config=./cloudbuild.yaml .
 ````
 
 
-# infrastructure
+# 3. infrastructure
 Infra as code (cloudbuild steps) for several components of fhirGPT platform that uses GCP AlloyDB.
 CloudBuild trigger will run these steps when this is checked into a GitHub repo branch
 
