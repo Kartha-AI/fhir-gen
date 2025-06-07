@@ -11,6 +11,7 @@ Read bottom for the infrastructure that supprots this
 
 ## Architecture
 <img src="fhir-gen-architecture.png">
+
 ### prereq:
 ````
 - cloud functions need to be enabled on GCP Project
